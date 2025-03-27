@@ -1,11 +1,14 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
-#include <vector>
 #include <map>
+#include <vector>
 #include <algorithm>
+#include <set>
 
 using namespace std;
+
+static const int INF = 999999;
 
 struct RouteInfo
 {
@@ -17,38 +20,19 @@ class Router
 {
 public:
     int id;
-    map<int, RouteInfo> routingTable; // destination -> {nextHop, cost}
-    map<int, int> neighbors;          // neighbor -> cost
-
+    map<int, RouteInfo> routingTable; // destinations mapped to RouteInfo
+    map<int, int> neighbors; // links neighbor id to cost of link to that neighbor
     Router() : id(-1) {}
     Router(int nodeId) : id(nodeId)
     {
-        routingTable[id] = {id, 0};
+        routingTable[nodeId] = {nodeId, 0};
     }
-
-    void updateFromNeighbor(int neighborId, const map<int, RouteInfo> &neighborTable, int costToNeighbor)
+    void removeRoutesThrough(int other)
     {
-        for (const auto &[dest, route] : neighborTable)
-        {
-            if (dest == id)
-                continue;
-                
-            int newCost = route.cost + costToNeighbor;
-
-            auto it = routingTable.find(dest);
-            if (it == routingTable.end() || newCost < it->second.cost ||
-                (newCost == it->second.cost && neighborId < it->second.nextHop))
-            {
-                routingTable[dest] = {neighborId, newCost};
-            }
-        }
-    }
-
-    void removeRoutesThrough(int removedNode)
-    {
+        neighbors.erase(other);
         for (auto it = routingTable.begin(); it != routingTable.end();)
         {
-            if (it->second.nextHop == removedNode || it->first == removedNode)
+            if (it->first == other || it->second.nextHop == other)
             {
                 it = routingTable.erase(it);
             }
@@ -57,20 +41,18 @@ public:
                 ++it;
             }
         }
-        neighbors.erase(removedNode);
     }
-
     void printTable(FILE *out) const
     {
-        vector<int> destinations;
-        for (const auto &entry : routingTable)
-            destinations.push_back(entry.first);
-        sort(destinations.begin(), destinations.end());
-
-        for (int dest : destinations)
+        vector<int> dests;
+        for (auto &kv : routingTable)
         {
-            const auto &r = routingTable.at(dest);
-            fprintf(out, "%d %d %d\n", dest, r.nextHop, r.cost);
+            dests.push_back(kv.first);
+        }
+        sort(dests.begin(), dests.end());
+        for (int d : dests)
+        {
+            fprintf(out, "%d %d %d\n", d, routingTable.at(d).nextHop, routingTable.at(d).cost);
         }
     }
 };
@@ -79,122 +61,228 @@ map<int, Router> network;
 
 void distanceVectorRouting()
 {
-    bool updated;
-    do
+    if (network.empty())
+        return;
+    vector<int> nodeIds;
+    for (auto &kv : network)
+        nodeIds.push_back(kv.first);
+    sort(nodeIds.begin(), nodeIds.end());
+    map<int, map<int, RouteInfo>> dist;
+    for (int i : nodeIds)
     {
-        updated = false;
-        for (auto &[nodeId, node] : network)
+        dist[i].clear();
+        dist[i][i] = {i, 0};
+    }
+    for (int i : nodeIds)
+    {
+        for (auto &nbr : network[i].neighbors)
         {
-            for (const auto &[neighborId, cost] : node.neighbors)
+            int n = nbr.first;
+            int cost = nbr.second;
+            if (!dist[i].count(n) || cost < dist[i][n].cost)
             {
-                size_t beforeSize = node.routingTable.size();
-                node.updateFromNeighbor(neighborId, network[neighborId].routingTable, cost);
-                if (node.routingTable.size() != beforeSize)
+                dist[i][n] = {n, cost};
+            }
+            else if (dist[i][n].cost == cost && n < dist[i][n].nextHop)
+            {
+                dist[i][n] = {n, cost};
+            }
+        }
+    }
+    int N = (int)nodeIds.size();
+    for (int r = 0; r < N - 1; r++)
+    {
+        bool changed = false;
+        auto newDist = dist;
+        for (int i : nodeIds)
+        {
+            for (auto &nbr : network[i].neighbors)
+            {
+                int n = nbr.first;
+                int cost_i_n = nbr.second;
+                for (auto &dEntry : dist[n])
                 {
-                    updated = true;
+                    int d = dEntry.first;
+                    int c_nd = dEntry.second.cost;
+                    if (c_nd >= INF)
+                        continue;
+                    long long alt = (long long)cost_i_n + c_nd;
+                    if (alt > INF)
+                        alt = INF;
+                    if (!newDist[i].count(d) || alt < newDist[i][d].cost)
+                    {
+                        newDist[i][d] = {n, (int)alt};
+                        changed = true;
+                    }
+                    else if ((int)alt == newDist[i][d].cost && (int)alt < INF)
+                    {
+                        if (n < newDist[i][d].nextHop)
+                        {
+                            newDist[i][d] = {n, (int)alt};
+                            changed = true;
+                        }
+                    }
                 }
             }
         }
-    } while (updated);
+        dist = newDist;
+        if (!changed)
+            break;
+    }
+    for (int i : nodeIds)
+    {
+        network[i].routingTable.clear();
+        for (auto &x : dist[i])
+        {
+            if (x.second.cost < INF)
+            {
+                network[i].routingTable[x.first] = x.second;
+            }
+        }
+    }
 }
 
-void processMessages(const string &file, FILE *out)
+void processMessages(const string &msgFile, FILE *out)
 {
-    ifstream in(file);
+    ifstream in(msgFile);
+    if (!in)
+        return;
     string line;
-
-    while (getline(in, line))
+    while (true)
     {
+        if (!getline(in, line))
+            break;
+        if (line.empty())
+            continue;
         istringstream ss(line);
         int src, dst;
         ss >> src >> dst;
         string msg;
         getline(ss, msg);
-
-        if (!network.count(src) || !network.count(dst) || !network[src].routingTable.count(dst))
+        if (!network.count(src) || !network.count(dst) ||
+            !network[src].routingTable.count(dst))
         {
-            fprintf(out, "from %d to %d cost infinite hops unreachable message%s\n", src, dst, msg.c_str());
+            fprintf(out, "from %d to %d cost infinite hops unreachable message%s\n",
+                    src, dst, msg.c_str());
             continue;
         }
-
-        vector<int> path = {src};
-        int curr = src, totalCost = 0;
+        int totalCost = 0;
+        int curr = src;
+        vector<int> path;
+        path.push_back(curr);
+        set<int> visited;
+        bool looped = false;
         while (curr != dst)
         {
-            int next = network[curr].routingTable[dst].nextHop;
-            totalCost += network[curr].neighbors[next];
-            path.push_back(next);
-            curr = next;
+            visited.insert(curr);
+            int nxt = network[curr].routingTable[dst].nextHop;
+            if (!network[curr].neighbors.count(nxt))
+            {
+                totalCost = INF;
+                break;
+            }
+            totalCost += network[curr].neighbors[nxt];
+            curr = nxt;
+            if (visited.count(curr))
+            {
+                looped = true;
+                break;
+            }
+            path.push_back(curr);
         }
-
-        fprintf(out, "from %d to %d cost %d hops", src, dst, totalCost);
-        for (size_t i = 0; i < path.size() - 1; ++i)
+        if (looped || totalCost >= INF)
         {
-            fprintf(out, " %d", path[i]);
+            fprintf(out, "from %d to %d cost infinite hops unreachable message%s\n",
+                    src, dst, msg.c_str());
         }
-        fprintf(out, " message%s\n", msg.c_str());
+        else
+        {
+            fprintf(out, "from %d to %d cost %d hops", src, dst, totalCost);
+            for (int i = 0; i + 1 < (int)path.size(); i++)
+            {
+                fprintf(out, " %d", path[i]);
+            }
+            fprintf(out, " message%s\n", msg.c_str());
+        }
     }
 }
 
 int main(int argc, char *argv[])
 {
     if (argc != 4)
-    {
-        cout << "Usage: ./distvec topofile messagefile changesfile\n";
         return 1;
-    }
-
     string topoFile = argv[1];
     string msgFile = argv[2];
     string changesFile = argv[3];
-
-    FILE *output = fopen("output.txt", "w");
-
-    ifstream in(topoFile);
-    int a, b, cost;
-    while (in >> a >> b >> cost)
     {
-        if (!network.count(a))
-            network[a] = Router(a);
-        if (!network.count(b))
-            network[b] = Router(b);
-        network[a].neighbors[b] = cost;
-        network[b].neighbors[a] = cost;
+        ifstream in(topoFile);
+        int a, b, c;
+        while (in >> a >> b >> c)
+        {
+            if (!network.count(a))
+                network[a] = Router(a);
+            if (!network.count(b))
+                network[b] = Router(b);
+            network[a].neighbors[b] = c;
+            network[b].neighbors[a] = c;
+        }
     }
+    FILE *out = fopen("output.txt", "w");
+    if (!out)
+        return 1;
     distanceVectorRouting();
-
-    for (const auto &[id, router] : network)
-        router.printTable(output);
-
-    processMessages(msgFile, output);
-
-    ifstream changes(changesFile);
-    string line;
-    while (getline(changes, line))
     {
-        fprintf(output, "-----\n");
-        istringstream ss(line);
-        int a, b, cost;
-        ss >> a >> b >> cost;
-
-        if (cost == -999)
+        vector<int> all;
+        for (auto &kv : network)
+            all.push_back(kv.first);
+        sort(all.begin(), all.end());
+        for (int id : all)
         {
-            if (network.count(a))
-                network[a].removeRoutesThrough(b);
-            if (network.count(b))
-                network[b].removeRoutesThrough(a);
+            network[id].printTable(out);
         }
-        else
-        {
-            network[a].neighbors[b] = cost;
-            network[b].neighbors[a] = cost;
-        }
-        distanceVectorRouting();
-        for (const auto &[id, router] : network)
-            router.printTable(output);
-        processMessages(msgFile, output);
     }
-
-    fclose(output);
+    processMessages(msgFile, out);
+    {
+        ifstream changes(changesFile);
+        string line;
+        while (true)
+        {
+            if (!getline(changes, line))
+                break;
+            if (line.empty())
+                continue;
+            // fprintf(out, "---test line\n");
+            istringstream ss(line);
+            int a, b, c;
+            ss >> a >> b >> c;
+            if (c == -999)
+            {
+                if (network.count(a))
+                    network[a].removeRoutesThrough(b);
+                if (network.count(b))
+                    network[b].removeRoutesThrough(a);
+            }
+            else
+            {
+                if (!network.count(a))
+                    network[a] = Router(a);
+                if (!network.count(b))
+                    network[b] = Router(b);
+                network[a].neighbors[b] = c;
+                network[b].neighbors[a] = c;
+            }
+            distanceVectorRouting();
+            vector<int> all;
+            for (auto &kv : network)
+                all.push_back(kv.first);
+            sort(all.begin(), all.end());
+            for (int id : all)
+            {
+                network[id].printTable(out);
+            }
+            processMessages(msgFile, out);
+        }
+    }
+    fclose(out);
     return 0;
 }
